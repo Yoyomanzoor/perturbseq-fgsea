@@ -1,0 +1,1 @@
+FYI, most of the rendered graphs won't show properly in the pdf. Each pdf render takes a long time, so I wasn't able to iteratively work through the right quarto settings to make the graphs show properly in the notebook. The best way to view the graphs is by running the commands interactively in the terminal.

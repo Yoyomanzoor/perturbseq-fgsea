@@ -17,8 +17,6 @@ format:
     toc-depth: 1
     number-sections: true
 
-bibliography: references.bib
-csl: https://www.zotero.org/styles/nature
 mainfont: "TeX Gyre Pagella"
 sansfont: "TeX Gyre Heros"
 monofont: "Fira Code"
@@ -1555,7 +1553,7 @@ p <- pheatmap(
 
 # Old code
 
-```r starting_point
+```r
 sce_pou3f3 <- sce[, sce$gene_target %in% c("Pou3f3", "Non_target")]
 # table(sce_pou3f3$gene_target)
 
