@@ -1,0 +1,1808 @@
+---
+title: "Bioinf 524 - Final Project"
+author: "Sumeed Manzoor"
+date: today
+
+format:
+  pdf:
+    pdf-engine: xelatex
+    documentclass: article
+    classoption: [11pt]
+    geometry: margin=1in
+    colorlinks: true
+    linkcolor: maize
+    urlcolor: maize
+    citecolor: maize
+    toc: true
+    toc-depth: 1
+    number-sections: true
+
+bibliography: references.bib
+csl: https://www.zotero.org/styles/nature
+mainfont: "TeX Gyre Pagella"
+sansfont: "TeX Gyre Heros"
+monofont: "Fira Code"
+
+header-includes:
+  - \usepackage{xcolor}
+  - \definecolor{michiganblue}{HTML}{00274C}
+  - \definecolor{maize}{HTML}{FFCB05}
+
+  # Section title styling
+  - \usepackage{sectsty}
+  - \sectionfont{\color{michiganblue}}
+  - \subsectionfont{\color{michiganblue}}
+  - \subsubsectionfont{\color{michiganblue}}
+
+  # Title styling
+  - \usepackage{titling}
+  - \pretitle{\begin{center}\color{michiganblue}\LARGE\bfseries}
+  - \posttitle{\par\end{center}\vskip 0.5em}
+  - \preauthor{\begin{center}\color{black}\large}
+  - \postauthor{\par\end{center}}
+  - \predate{\begin{center}\color{black}\small}
+  - \postdate{\par\end{center}}
+
+  # Bold text color override
+  - \let\oldtextbf\textbf
+  - \renewcommand{\textbf}[1]{\oldtextbf{\textcolor{michiganblue}{#1}}}
+
+  # Hyperref setup (links)
+  - \usepackage{hyperref}
+  - \hypersetup{
+      colorlinks=true,
+      linkcolor=maize,
+      urlcolor=maize,
+      citecolor=maize
+    }
+
+  # Optional: nicer spacing
+  - \usepackage{setspace}
+  - \setstretch{1.1}
+
+  # Optional: paragraph spacing instead of indent
+  - \setlength{\parindent}{0pt}
+  - \setlength{\parskip}{6pt}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+First, sorry for the spaghetti code. I tried to refactor and clean up the document, but for the most part it's quite raw.
+
+# Libraries {.unnumbered}
+
+```{r libraries}
+# I learned that vscode will not respect this no matter what if I am using radian
+# So on vscode, use base R.
+Sys.setenv(
+  RETICULATE_PYTHON = "/home/yoyomanzoor/.local/share/mamba/envs/py3.13/bin/python"
+)
+library(reticulate)
+use_python(
+  "/home/yoyomanzoor/.local/share/mamba/envs/py3.13/bin/python",
+  required = TRUE
+)
+
+library(ggplot2)
+library(ggpubr)
+library(ggsci)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(tibble)
+library(pheatmap)
+
+library(zellkonverter)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(scuttle)
+library(edgeR)
+library(fgsea)
+library(msigdbr)
+
+theme_set(theme_pubr())
+options(
+  ggplot2.discrete.colour = scale_color_nejm,
+  ggplot2.discrete.fill   = scale_fill_nejm
+)
+
+nejm_red  <- pal_nejm()(2)[1]  # "#BC3C29FF"
+nejm_blue <- pal_nejm()(2)[2]  # "#0072B5FF"
+```
+
+# Set up
+
+## Downloading data
+
+The dataset for the whole brain CRISPR atlas is hosted on [huggingface](https://huggingface.co/datasets/perturbai/wholebrain_crispr_atlas). It's a large dataset -- 80 gigs!
+
+To download, you should clone their [repo](https://github.com/jinlabneurogenomics/wholebrainperturbseq).
+
+When I tried to use their scripts, however, I found some bugs. Since there is no license yet for me to copy their files with my edits, instead I will describe the changes you might need to make to their scripts and how to run them. Good luck!
+
+At a high level, the way to use the scripts is run
+
+```bash
+python scripts/download.py --output-dir /path/to/output
+```
+
+You will need huggingface_hub installed from pip. It will download the h5ad shards, metadata, etc.
+
+Then, you can run the preprocessing scripts they provided, with the following changes. In `merge_batches.py`, change the following:
+
+```diff
+    parser.add_argument(
+        "--write_zarr",
+-        type=bool,
+-        default=False,
++        action="store_true",
+        help="Write the merged adata to a zarr file",
+    )
+    parser.add_argument(
+        "--write_h5ad",
+-        type=bool,
+-        default=False,
++        action="store_true",
+        help="Write the merged adata to a h5ad file",
+    )
+```
+
+In `processing_script.sh`, change the following:
+
+```diff
+diff --git a/wholebrainperturbseq/scripts/processing_script.sh b/wholebrainperturbseq/scripts/processing_script.sh
+@@ -78,0 +78,22 @@
+    MERGE_CMD="${MERGE_CMD} --data_path ${PROCESSED_DIR}/batch${i}/${SCREEN_NAME}_batch${i}_gex_filtered.h5ad"
+done
+-MERGE_CMD="${MERGE_CMD} --output_dir ${PROCESSED_DIR} --output_name ${SCREEN_NAME}_gex_filtered.h5ad" --write_zarr True --write_h5ad True
++MERGE_CMD="${MERGE_CMD} --output_dir ${PROCESSED_DIR} --output_name ${SCREEN_NAME}_gex_filtered.h5ad --write_h5ad"
+
+echo "Executing: ${MERGE_CMD}"
+eval ${MERGE_CMD}
+echo "✓ Batches merged"
+echo ""
+
+# Step 4: Final QC on merged file
+echo "Step 4: Final QC on merged file..."
+python filter_for_deg.py \
+    --data_path "${PROCESSED_DIR}/${SCREEN_NAME}_gex_filtered.h5ad" \
+    --output_dir "${PROCESSED_DIR}/" \
+    --output_name "${SCREEN_NAME}_gex_filtered.h5ad" \
+    --min_cells_per_gene ${FINAL_MIN_CELLS_PER_GENE} \
+    --min_cells_per_subclass ${FINAL_MIN_CELLS_PER_SUBCLASS} \
+    --remove_unassigned \
+    --unassigned_label "${UNASSIGNED_LABEL}" \
+-    --write_zarr
++    --write_h5ad
+echo "✓ Final QC completed"
+```
+
+This will make the zarr and h5ad flags work properly. Otherwise, if you try to write to zarr, it just won't work! (Speaking from experience here).
+
+You will need to update the `BASE_DATA_PATH` in the script to wherever you want it to go to.
+
+Now, it should work. I ran it with this command:
+
+```bash
+PYTHONPATH=/path/to/project/working/directory scripts/processing_script.sh 1
+```
+
+This will run one batch in processing. I tried all four batches, or even just two, but my computer crashes on the second batch. Fortunately, even with just 1 batch, I get >100,000 cells, which I'm happy with.
+
+## Environment stuff
+
+Make sure `py_config` is pointing to an environment that has anndata, otherwise reticulate will fail to load in the h5ad shards.
+
+I think for computers with limited RAM, using zarr format in the download and analysis might be easier on your computer.
+
+```{r starting}
+py_config()
+```
+
+# Introduction
+
+This dataset is a massive whole brain CRISPR screen. It follows the current trend from the Allen Institute, Arc, and others of pushing out massive datasets with perturbations to help build models and investigate interesting dynamics.
+
+## setup pathways
+
+```{r pathways_setup}
+msig_mouse <- msigdbr(species = "Mus musculus")
+colnames(msig_mouse)
+
+hallmark_df <- msig_mouse %>%
+  filter(gs_collection == "H")
+pathways_h <- split(hallmark_df$gene_symbol, hallmark_df$gs_name)
+
+# C2 curated pathways
+c2_df <- msig_mouse %>%
+  filter(gs_collection == "C2")
+pathways_c2 <- split(c2_df$gene_symbol, c2_df$gs_name)
+
+go_bp_df <- msig_mouse %>%
+  filter(gs_subcollection == "GO:BP")
+pathways_go_bp <- split(go_bp_df$gene_symbol, go_bp_df$gs_name)
+
+go_cc_df <- msig_mouse %>%
+  filter(gs_subcollection == "GO:CC")
+pathways_go_cc <- split(go_cc_df$gene_symbol, go_cc_df$gs_name)
+
+go_mf_df <- msig_mouse %>%
+  filter(gs_subcollection == "GO:MF")
+pathways_go_mf <- split(go_mf_df$gene_symbol, go_mf_df$gs_name)
+
+pathways_list <- list(
+  Hallmark = pathways_h,
+  C2 = pathways_c2,
+  GO_BP = pathways_go_bp,
+  GO_CC = pathways_go_cc,
+  GO_MF = pathways_go_mf
+)
+```
+
+## load data
+
+```{r data}
+h5ad_path <- "/home/yoyomanzoor/Crucial/wholebrainperturbseq/processed/WB8588_screen_gex_filtered.h5ad"
+
+sce <- readH5AD(h5ad_path)
+
+sce
+dim(sce)         # genes x cells
+assayNames(sce)  # available assays
+```
+
+## metadata overview and quality control
+
+```{r metadata}
+# What metadata columns are available?
+colnames(colData(sce))
+
+colnames(colData(sce))  # cell metadata columns
+rownames(rowData(sce))[1:5]
+```
+
+```{r stats}
+cat("Cells:", ncol(sce), "\n")
+cat("Genes:", nrow(sce), "\n")
+cat("Unique mice:", length(unique(sce$mouse)), "\n")
+cat("Unique targets:", length(unique(sce$gene_target)), "\n")
+cat("Unique subclasses:", length(unique(sce$subclass_name)), "\n")
+cat("Unique classes:", length(unique(sce$class_name)), "\n")
+```
+
+```{r metadata_summary}
+sort(table(sce$class_name), decreasing = TRUE)[1:20]
+sort(table(sce$subclass_name), decreasing = TRUE)[1:30]
+sort(table(sce$cluster_name), decreasing = TRUE)[1:30]
+sort(table(sce$gene_target), decreasing = TRUE)[1:30]
+sort(table(sce$mouse), decreasing = TRUE)
+sort(table(sce$sample_label), decreasing = TRUE)
+sort(table(sce$region_level1), decreasing = TRUE)
+sort(table(sce$region_level2), decreasing = TRUE)[1:30]
+```
+
+```{r qc_summary}
+summary(sce$total_counts)
+summary(sce$num_genes)
+summary(sce$pct_counts_mt)
+summary(sce$num_guides)
+summary(sce$log_ambient_mse_norm)
+summary(sce$predicted_subclass_probability)
+```
+
+```{r qc_plots}
+qc_df <- as.data.frame(colData(sce))
+
+p1 <- ggplot(qc_df, aes(x = total_counts)) +
+  geom_histogram(bins = 100) +
+  scale_x_log10() +
+  ggtitle("Total counts per cell")
+
+p2 <- ggplot(qc_df, aes(x = num_genes)) +
+  geom_histogram(bins = 100) +
+  scale_x_log10() +
+  ggtitle("Detected genes per cell")
+
+p3 <- ggplot(qc_df, aes(x = pct_counts_mt)) +
+  geom_histogram(bins = 100) +
+  ggtitle("Percent mitochondrial counts")
+
+p4 <- ggplot(qc_df, aes(x = num_guides)) +
+  geom_histogram(bins = 50) +
+  ggtitle("Number of guides per cell")
+
+(p1 | p2) / (p3 | p4)
+```
+
+```{r cell_type_tables}
+class_counts <- as.data.frame(sort(table(sce$class_name), decreasing = TRUE))
+colnames(class_counts) <- c("class_name", "n_cells")
+
+subclass_counts <- as.data.frame(sort(table(sce$subclass_name), decreasing = TRUE))
+colnames(subclass_counts) <- c("subclass_name", "n_cells")
+
+cluster_counts <- as.data.frame(sort(table(sce$cluster_name), decreasing = TRUE))
+colnames(cluster_counts) <- c("cluster_name", "n_cells")
+
+head(class_counts, 20)
+head(subclass_counts, 30)
+head(cluster_counts, 30)
+```
+
+```{r perturbation_overview}
+target_counts <- as.data.frame(sort(table(sce$gene_target), decreasing = TRUE))
+colnames(target_counts) <- c("gene_target", "n_cells")
+
+head(target_counts, 30)
+
+# non-target vs others
+table(sce$gene_target == "Non_target")
+```
+
+```{r cross_tab}
+top_subclasses <- names(sort(table(sce$subclass_name), decreasing = TRUE))[1:15]
+top_targets <- names(sort(table(sce$gene_target), decreasing = TRUE))[1:15]
+
+xt <- table(
+  subclass = factor(sce$subclass_name, levels = top_subclasses),
+  target = factor(sce$gene_target, levels = top_targets)
+)
+
+xt
+```
+
+## UMAP and visualization
+
+```{r umap}
+assay(sce, "counts") <- assay(sce, "X")
+set.seed(1)
+idx <- sample(seq_len(ncol(sce)), min(20000, ncol(sce)))
+sce_sub <- sce[, idx]
+# normalize from counts assay
+sce_sub <- logNormCounts(sce_sub)
+
+# variable genes
+dec <- modelGeneVar(sce_sub)
+top_hvgs <- getTopHVGs(dec, n = 2000)
+
+# PCA + UMAP
+sce_sub <- runPCA(sce_sub, subset_row = top_hvgs, ncomponents = 30)
+sce_sub <- runUMAP(sce_sub, dimred = "PCA")
+
+# plotReducedDim(
+#   sce_sub,
+#   dimred = "UMAP",
+#   colour_by = "subclass_name"
+# ) + ggtitle("UMAP colored by subclass")
+
+plotReducedDim(
+  sce_sub,
+  dimred = "UMAP",
+  colour_by = "class_name"
+) + ggtitle("UMAP colored by class")
+
+top_targets <- names(sort(table(sce_sub$gene_target), decreasing = TRUE))[1:12]
+
+sce_sub$gene_target_plot <- ifelse(
+  sce_sub$gene_target %in% top_targets,
+  sce_sub$gene_target,
+  "other"
+)
+
+plotReducedDim(
+  sce_sub,
+  dimred = "UMAP",
+  colour_by = "gene_target_plot"
+) + ggtitle("UMAP colored by common perturbations")
+
+plotReducedDim(
+  sce_sub,
+  dimred = "UMAP",
+  colour_by = "mouse"
+) + ggtitle("UMAP colored by mouse")
+
+plotReducedDim(
+  sce_sub,
+  dimred = "UMAP",
+  colour_by = "region_level1"
+) + ggtitle("UMAP colored by region_level1")
+
+plotReducedDim(
+  sce_sub,
+  dimred = "UMAP",
+  colour_by = "region_level2"
+) + ggtitle("UMAP colored by region_level2")
+```
+
+## Data investigation
+
+I was interested in seeing if Pvalb, Sst, and Lamp5 interneurons had different cell types. I hopes they would be cortical and show ganglionic eminence differences, which they do!
+
+```{r}
+sce[, sce$subclass_name == "052 Pvalb Gaba"]$class_name %>% table() %>% sort(decreasing = TRUE)
+sce[, sce$subclass_name == "053 Sst Gaba"]$class_name %>% table() %>% sort(decreasing = TRUE)
+sce[, sce$subclass_name == "049 Lamp5 Gaba"]$class_name %>% table() %>% sort(decreasing = TRUE)
+```
+
+# Pvalb vs Lamp5
+
+I first tried comparing these two subclasses using fgsea.
+
+```{r subclass_analysis}
+subclasses_keep <- c("052 Pvalb Gaba", "049 Lamp5 Gaba")
+
+sce2 <- sce[, sce$subclass_name %in% subclasses_keep]
+sce2$subclass_name <- droplevels(factor(sce2$subclass_name, levels = subclasses_keep))
+table(sce2$subclass_name)
+
+sce2$region_level1 %>% table() %>% sort(decreasing = TRUE)
+sce2$class_name %>% table() %>% sort(decreasing = TRUE)
+
+sce2_ctrl <- sce2[, sce2$gene_target == "Non_target"]
+sce2_ctrl$subclass_name <- droplevels(sce2_ctrl$subclass_name)
+table(sce2_ctrl$subclass_name)
+```
+
+```{r umap_subclasses}
+sce_umap <- sce2_ctrl
+
+sce_umap <- logNormCounts(sce_umap)
+
+dec <- modelGeneVar(sce_umap)
+top_hvgs <- getTopHVGs(dec, n = 2000)
+
+sce_umap <- runPCA(sce_umap, subset_row = top_hvgs, ncomponents = 30)
+sce_umap <- runUMAP(sce_umap, dimred = "PCA")
+
+plotReducedDim(
+  sce_umap,
+  dimred = "UMAP",
+  colour_by = "subclass_name"
+) + ggtitle("Pvalb Gaba vs Lamp5 Gaba")
+
+plotReducedDim(
+  sce_umap,
+  dimred = "UMAP",
+  colour_by = "mouse"
+) + ggtitle("UMAP colored by mouse")
+```
+
+```{r deg}
+sce_de <- sce2_ctrl
+
+pb_id <- interaction(sce_de$mouse, sce_de$subclass_name, drop = TRUE)
+
+pb_counts <- sapply(levels(pb_id), function(g) {
+  cols <- which(pb_id == g)
+  Matrix::rowSums(assay(sce_de, "counts")[, cols, drop = FALSE])
+})
+
+pb_counts <- as.matrix(pb_counts)
+colnames(pb_counts) <- levels(pb_id)
+
+pb_meta <- data.frame(sample = colnames(pb_counts), stringsAsFactors = FALSE)
+pb_meta$mouse <- sub("\\.(.*)$", "", pb_meta$sample)
+pb_meta$subclass_name <- sub("^[^.]+\\.", "", pb_meta$sample)
+
+pb_meta$subclass_name <- factor(
+  pb_meta$subclass_name,
+  levels = c("049 Lamp5 Gaba", "052 Pvalb Gaba")
+)
+
+pb_meta
+```
+
+```{r edgeR}
+y <- DGEList(counts = pb_counts)
+keep <- filterByExpr(y, group = pb_meta$subclass_name)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y)
+
+design <- model.matrix(~ subclass_name, data = pb_meta)
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design)
+qlf <- glmQLFTest(fit, coef = 2)
+
+de_tab <- topTags(qlf, n = Inf)$table
+head(de_tab)
+```
+
+```{r ranks}
+ranks <- de_tab$logFC * -log10(de_tab$PValue + 1e-300)
+names(ranks) <- rownames(de_tab)
+ranks <- sort(ranks, decreasing = TRUE)
+
+head(ranks)
+tail(ranks)
+```
+
+```{r inspect_de_tab}
+de_tab %>%
+  arrange(desc(logFC)) %>%
+  head(20)
+
+de_tab %>%
+  arrange(logFC) %>%
+  head(20)
+```
+
+```{r fgsea}
+fg_h <- fgsea(
+  pathways = pathways_h,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_h <- fg_h[order(fg_h$padj), ]
+head(fg_h[, c("pathway", "NES", "padj", "size")], 20)
+```
+
+```{r fgsea_c2}
+fg_c2 <- fgsea(
+  pathways = pathways_c2,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_c2 <- fg_c2[order(fg_c2$padj), ]
+head(fg_c2[, c("pathway", "NES", "padj", "size")], 20)
+```
+
+```{r fgsea_c5}
+fg_go_bp <- fgsea(
+  pathways = pathways_go_bp,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_bp <- fg_go_bp[order(fg_go_bp$padj), ]
+head(fg_go_bp[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_bp <- fg_go_bp %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_go_bp, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Lamp5: GO:BP",
+    fill = "FDR < 0.05"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_go_cc <- fgsea(
+  pathways = pathways_go_cc,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_cc <- fg_go_cc[order(fg_go_cc$padj), ]
+head(fg_go_cc[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_cc <- fg_go_cc %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_go_cc, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Lamp5: GO:CC",
+    fill = "FDR < 0.05"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_go_mf <- fgsea(
+  pathways = pathways_go_mf,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_mf <- fg_go_mf[order(fg_go_mf$padj), ]
+head(fg_go_mf[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_mf <- fg_go_mf %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_go_mf, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Lamp5: GO:MF",
+    fill = "FDR < 0.05"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r plot_fgsea}
+#| out-width: "60%"
+top_fg <- fg_h %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Lamp5: Hallmark"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+top_fg_c2 <- fg_c2 %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_c2, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Lamp5: C2 curated pathways"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+# Pvalb vs Sst
+
+Then I interrogated Pvalb and Sst in the same way.
+
+```{r subclass_pvalb_sst}
+subclasses_keep <- c("052 Pvalb Gaba", "053 Sst Gaba")
+
+sce2 <- sce[, sce$subclass_name %in% subclasses_keep]
+sce2$subclass_name <- droplevels(factor(sce2$subclass_name, levels = subclasses_keep))
+table(sce2$subclass_name)
+
+sce2$region_level1 %>% table() %>% sort(decreasing = TRUE)
+```
+
+These cells are entirely cortical, as expected. 
+
+```{r}
+#| out-width: "60%"
+sce2_ctrl <- sce2[, sce2$gene_target == "Non_target"]
+sce2_ctrl$subclass_name <- droplevels(sce2_ctrl$subclass_name)
+table(sce2_ctrl$subclass_name)
+
+sce_umap <- sce2_ctrl
+
+sce_umap <- logNormCounts(sce_umap)
+
+dec <- modelGeneVar(sce_umap)
+top_hvgs <- getTopHVGs(dec, n = 2000)
+
+sce_umap <- runPCA(sce_umap, subset_row = top_hvgs, ncomponents = 30)
+sce_umap <- runUMAP(sce_umap, dimred = "PCA")
+
+plotReducedDim(
+  sce_umap,
+  dimred = "UMAP",
+  colour_by = "subclass_name"
+) + ggtitle("Pvalb Gaba vs Sst Gaba")
+
+plotReducedDim(
+  sce_umap,
+  dimred = "UMAP",
+  colour_by = "mouse"
+) + ggtitle("UMAP colored by mouse")
+
+sce_de <- sce2_ctrl
+
+pb_id <- interaction(sce_de$mouse, sce_de$subclass_name, drop = TRUE)
+
+pb_counts <- sapply(levels(pb_id), function(g) {
+  cols <- which(pb_id == g)
+  Matrix::rowSums(assay(sce_de, "counts")[, cols, drop = FALSE])
+})
+
+pb_counts <- as.matrix(pb_counts)
+colnames(pb_counts) <- levels(pb_id)
+
+pb_meta <- data.frame(sample = colnames(pb_counts), stringsAsFactors = FALSE)
+pb_meta$mouse <- sub("\\.(.*)$", "", pb_meta$sample)
+pb_meta$subclass_name <- sub("^[^.]+\\.", "", pb_meta$sample)
+
+pb_meta$subclass_name <- factor(
+  pb_meta$subclass_name,
+  levels = c("052 Pvalb Gaba", "053 Sst Gaba")
+)
+
+pb_meta
+
+y <- DGEList(counts = pb_counts)
+keep <- filterByExpr(y, group = pb_meta$subclass_name)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y)
+
+design <- model.matrix(~ subclass_name, data = pb_meta)
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design)
+qlf <- glmQLFTest(fit, coef = 2)
+
+de_tab <- topTags(qlf, n = Inf)$table
+head(de_tab)
+
+ranks <- de_tab$logFC * -log10(de_tab$PValue + 1e-300)
+names(ranks) <- rownames(de_tab)
+ranks <- sort(ranks, decreasing = TRUE)
+
+head(ranks)
+tail(ranks)
+
+fg_h <- fgsea(
+  pathways = pathways_h,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_h <- fg_h[order(fg_h$padj), ]
+head(fg_h[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg <- fg_h %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Sst: Hallmark"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_c2 <- fgsea(
+  pathways = pathways_c2,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_c2 <- fg_c2[order(fg_c2$padj), ]
+head(fg_c2[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_c2 <- fg_c2 %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_c2, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Sst: C2 curated pathways"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_go_bp <- fgsea(
+  pathways = pathways_go_bp,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_bp <- fg_go_bp[order(fg_go_bp$padj), ]
+head(fg_go_bp[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_bp <- fg_go_bp %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_go_bp, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Sst: GO:BP"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_go_cc <- fgsea(
+  pathways = pathways_go_cc,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_cc <- fg_go_cc[order(fg_go_cc$padj), ]
+head(fg_go_cc[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_cc <- fg_go_cc %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 5)
+
+ggplot(top_fg_go_cc, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Sst: GO:CC"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+fg_go_mf <- fgsea(
+  pathways = pathways_go_mf,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg_go_mf <- fg_go_mf[order(fg_go_mf$padj), ]
+head(fg_go_mf[, c("pathway", "NES", "padj", "size")], 20)
+
+top_fg_go_mf <- fg_go_mf %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg_go_mf, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "Pvalb vs Sst: GO:MF"
+  ) +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+top_fg_go_mf %>% arrange(NES)
+```
+
+# Perturbation investigation
+
+This function was generated with the help of AI, based on the analysis so far.
+
+```{r}
+run_multi_fgsea <- function(
+  sce,
+  pathways_list,
+  group_col,
+  group1,
+  group2,
+  sample_col = "mouse",
+  gene_target = NULL,
+  region_level1 = NULL,
+  region_level2 = NULL,
+  class_name = NULL,
+  subclass_name = NULL,
+  minSize = 15,
+  maxSize = 500,
+  top_n = 15,
+  n_hvgs = 2000,
+  n_pcs = 30,
+  rank_fun = NULL
+) {
+  # Required packages:
+  # library(SingleCellExperiment)
+  # library(scuttle)
+  # library(scran)
+  # library(scater)
+  # library(edgeR)
+  # library(fgsea)
+  # library(dplyr)
+  # library(ggplot2)
+  # library(Matrix)
+
+  if (is.null(rank_fun)) {
+    rank_fun <- function(de_tab) {
+      r <- de_tab$logFC * -log10(de_tab$PValue + 1e-300)
+      names(r) <- rownames(de_tab)
+      sort(r, decreasing = TRUE)
+    }
+  }
+
+  #----------------------------
+  # 1) Filter cells
+  #----------------------------
+  sce_sub <- sce
+
+  if (!is.null(gene_target)) {
+    sce_sub <- sce_sub[, sce_sub$gene_target %in% gene_target]
+  }
+  if (!is.null(region_level1)) {
+    sce_sub <- sce_sub[, sce_sub$region_level1 %in% region_level1]
+  }
+  if (!is.null(region_level2)) {
+    sce_sub <- sce_sub[, sce_sub$region_level2 %in% region_level2]
+  }
+  if (!is.null(class_name)) {
+    sce_sub <- sce_sub[, sce_sub$class_name %in% class_name]
+  }
+  if (!is.null(subclass_name)) {
+    sce_sub <- sce_sub[, sce_sub$subclass_name %in% subclass_name]
+  }
+
+  if (ncol(sce_sub) == 0) {
+    stop("No cells remain after filtering.")
+  }
+
+  if (!group_col %in% colnames(colData(sce_sub))) {
+    stop("group_col not found in colData(sce).")
+  }
+  if (!sample_col %in% colnames(colData(sce_sub))) {
+    stop("sample_col not found in colData(sce).")
+  }
+
+  sce_sub <- sce_sub[, sce_sub[[group_col]] %in% c(group1, group2)]
+
+  if (ncol(sce_sub) == 0) {
+    stop("No cells remain after restricting to group1/group2.")
+  }
+
+  sce_sub[[group_col]] <- droplevels(factor(sce_sub[[group_col]], levels = c(group1, group2)))
+
+  present_groups <- levels(droplevels(sce_sub[[group_col]]))
+  if (!all(c(group1, group2) %in% present_groups)) {
+    stop("Both group1 and group2 must be present after filtering.")
+  }
+
+  #----------------------------
+  # 2) UMAP workflow
+  #----------------------------
+  sce_umap <- sce_sub
+  sce_umap <- scuttle::logNormCounts(sce_umap)
+
+  dec <- scran::modelGeneVar(sce_umap)
+  top_hvgs <- scran::getTopHVGs(dec, n = n_hvgs)
+
+  sce_umap <- scater::runPCA(sce_umap, subset_row = top_hvgs, ncomponents = n_pcs)
+  sce_umap <- scater::runUMAP(sce_umap, dimred = "PCA")
+
+  umap_coords <- as.data.frame(SingleCellExperiment::reducedDim(sce_umap, "UMAP"))
+  colnames(umap_coords) <- c("UMAP1", "UMAP2")
+
+  umap_df <- cbind(
+    umap_coords,
+    as.data.frame(colData(sce_umap))
+  ) %>%
+    dplyr::mutate(
+      plot_group = .data[[group_col]]
+    )
+
+  #----------------------------
+  # 3) Pseudobulk
+  #----------------------------
+  pb_id <- interaction(
+    sce_sub[[sample_col]],
+    sce_sub[[group_col]],
+    drop = TRUE
+  )
+
+  pb_counts <- sapply(levels(pb_id), function(g) {
+    cols <- which(pb_id == g)
+    Matrix::rowSums(SummarizedExperiment::assay(sce_sub, "counts")[, cols, drop = FALSE])
+  })
+
+  pb_counts <- as.matrix(pb_counts)
+  colnames(pb_counts) <- levels(pb_id)
+
+  pb_meta <- data.frame(sample = colnames(pb_counts), stringsAsFactors = FALSE)
+  pb_meta[[sample_col]] <- sub("\\.(.*)$", "", pb_meta$sample)
+  pb_meta[[group_col]] <- sub("^[^.]+\\.", "", pb_meta$sample)
+  pb_meta[[group_col]] <- factor(pb_meta[[group_col]], levels = c(group1, group2))
+
+  #----------------------------
+  # 4) Differential expression
+  #----------------------------
+  y <- edgeR::DGEList(counts = pb_counts)
+  keep <- edgeR::filterByExpr(y, group = pb_meta[[group_col]])
+  y <- y[keep, , keep.lib.sizes = FALSE]
+  y <- edgeR::calcNormFactors(y)
+
+  design_df <- pb_meta
+  design <- stats::model.matrix(
+    stats::as.formula(paste0("~ ", group_col)),
+    data = design_df
+  )
+
+  y <- edgeR::estimateDisp(y, design)
+  fit <- edgeR::glmQLFit(y, design)
+  qlf <- edgeR::glmQLFTest(fit, coef = 2)
+
+  de_tab <- edgeR::topTags(qlf, n = Inf)$table
+  ranks <- rank_fun(de_tab)
+
+  #----------------------------
+  # 5) FGSEA across databases
+  #----------------------------
+  fgsea_list <- lapply(names(pathways_list), function(db_name) {
+    fg <- fgsea::fgsea(
+      pathways = pathways_list[[db_name]],
+      stats = ranks,
+      minSize = minSize,
+      maxSize = maxSize
+    )
+
+    fg <- fg[order(fg$padj), ]
+    fg_df <- as.data.frame(fg) %>%
+      dplyr::mutate(
+        database = db_name,
+        contrast = paste0(group2, " vs ", group1)
+      )
+
+    top_df <- fg_df %>%
+      dplyr::arrange(padj) %>%
+      dplyr::slice_head(n = top_n) %>%
+      dplyr::mutate(
+        pathway = factor(pathway, levels = pathway[order(NES)])
+      )
+
+    list(
+      full = fg_df,
+      top = top_df
+    )
+  })
+
+  names(fgsea_list) <- names(pathways_list)
+
+  fgsea_all <- dplyr::bind_rows(lapply(fgsea_list, `[[`, "full")) %>%
+    dplyr::arrange(database, padj)
+
+  fgsea_top <- dplyr::bind_rows(lapply(fgsea_list, `[[`, "top")) %>%
+    dplyr::arrange(database, padj)
+
+  #----------------------------
+  # 6) Return
+  #----------------------------
+  list(
+    sce_filtered = sce_sub,
+    sce_umap = sce_umap,
+    umap_df = umap_df,
+    pb_meta = pb_meta,
+    de_table = de_tab,
+    ranks = ranks,
+    fgsea = fgsea_list,
+    fgsea_all = fgsea_all,
+    fgsea_top = fgsea_top,
+    contrast = list(
+      group_col = group_col,
+      group1 = group1,
+      group2 = group2
+    )
+  )
+}
+
+get_leading_edge <- function(res, database, target_pathway) {
+  df <- res$fgsea[[database]]$full
+  
+  genes <- df %>%
+    dplyr::filter(pathway == target_pathway) %>%
+    dplyr::pull(leadingEdge) %>%
+    .[[1]]
+  
+  out <- res$de_table[genes, , drop = FALSE]
+  out$gene <- rownames(out)
+  
+  out %>%
+    dplyr::arrange(desc(logFC))
+}
+```
+
+```{r}
+res <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Non_target",
+  group2 = "Mif",
+  region_level1 = "Cortex"
+)
+```
+
+```{r}
+ggplot(res$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res$contrast$group_col,
+    title = paste0("UMAP colored by ", res$contrast$group_col)
+  ) +
+  scale_color_manual(values = c(`Non_target` = "#CCCCCC", `Mif` = "Black"))
+```
+
+```{r}
+res$fgsea_top %>%
+  dplyr::filter(database == "GO_BP") %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res$contrast$group2, " vs ", res$contrast$group1, ": GO_BP")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+ggplot(res$fgsea_top, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ database, scales = "free_y") +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res$contrast$group2, " vs ", res$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+top_fg_h <- res$fgsea$Hallmark$top
+
+ggplot(top_fg_h, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res$contrast$group2, " vs ", res$contrast$group1, ": Hallmark")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_pou3f3 <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Non_target",
+  group2 = "Pou3f3",
+  region_level1 = "Cortex"
+)
+
+ggplot(res_pou3f3$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_pou3f3$contrast$group_col,
+    title = paste0("UMAP colored by ", res_pou3f3$contrast$group_col)
+  ) +
+  scale_color_manual(values = c(`Non_target` = "#CCCCCC", `Pou3f3` = "Black"))
+
+res_pou3f3$fgsea_top %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_pou3f3$contrast$group2, " vs ", res_pou3f3$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+
+top_fg_h <- res_pou3f3$fgsea$Hallmark$top
+
+ggplot(top_fg_h, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_pou3f3$contrast$group2, " vs ", res_pou3f3$contrast$group1, ": Hallmark")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_zbtb7a <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Non_target",
+  group2 = "Zbtb7a",
+  region_level1 = "Cortex"
+)
+
+ggplot(res_zbtb7a$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_zbtb7a$contrast$group_col,
+    title = paste0("UMAP colored by ", res_zbtb7a$contrast$group_col)
+  ) +
+  scale_color_manual(values = c(`Non_target` = "#CCCCCC", `Zbtb7a` = "Black"))
+
+res_zbtb7a$fgsea_top %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_zbtb7a$contrast$group2, " vs ", res_zbtb7a$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+top_fg_h <- res_zbtb7a$fgsea$Hallmark$top
+
+ggplot(top_fg_h, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_zbtb7a$contrast$group2, " vs ", res_zbtb7a$contrast$group1, ": Hallmark")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_zbtb7a_vs_adrb3 <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Adrb3",
+  group2 = "Zbtb7a",
+  region_level1 = "Cortex"
+)
+
+ggplot(res_zbtb7a_vs_adrb3$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_zbtb7a_vs_adrb3$contrast$group_col,
+    title = paste0("UMAP colored by ", res_zbtb7a_vs_adrb3$contrast$group_col)
+  )
+
+res_zbtb7a_vs_adrb3$fgsea_top %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_zbtb7a_vs_adrb3$contrast$group2, " vs ", res_zbtb7a_vs_adrb3$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+
+top_fg_h <- res_zbtb7a_vs_adrb3$fgsea$Hallmark$top
+
+ggplot(top_fg_h, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_zbtb7a_vs_adrb3$contrast$group2, " vs ", res_zbtb7a_vs_adrb3$contrast$group1, ": Hallmark")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_pou3f3_vs_mif <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Mif",
+  group2 = "Pou3f3",
+  region_level1 = "Cortex"
+)
+
+ggplot(res_pou3f3_vs_mif$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_pou3f3_vs_mif$contrast$group_col,
+    title = paste0("UMAP colored by ", res_pou3f3_vs_mif$contrast$group_col)
+  )
+
+res_pou3f3_vs_mif$fgsea_top %>%
+  dplyr::filter(database == "GO_BP") %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_pou3f3_vs_mif$contrast$group2, " vs ", res_pou3f3_vs_mif$contrast$group1, ": GO_BP")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+res_pou3f3_vs_mif$fgsea_top %>%
+  dplyr::filter(database == "C2") %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_pou3f3_vs_mif$contrast$group2, " vs ", res_pou3f3_vs_mif$contrast$group1, ": C2")
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+
+get_leading_edge(res_pou3f3_vs_mif, "C2", "WP_OXIDATIVE_PHOSPHORYLATION")
+
+le <- get_leading_edge(res_pou3f3_vs_mif, "C2", "WP_SPINAL_CORD_INJURY")
+
+genes <- le %>%
+  dplyr::distinct(gene) |>
+  dplyr::filter(!is.na(gene)) |>
+  dplyr::filter(gene %in% rownames(res_pou3f3_vs_mif$sce_umap)) |>
+  dplyr::slice_head(n = 20) |>
+  dplyr::pull(gene)
+
+scater::plotExpression(
+  res_pou3f3_vs_mif$sce_umap,
+  features = genes,
+  x = res_pou3f3_vs_mif$contrast$group_col
+)
+```
+
+```{r}
+res_sox11_vs_gata6 <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Gata6",
+  group2 = "Sox11",
+)
+
+p1 <-ggplot(res_sox11_vs_gata6$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_sox11_vs_gata6$contrast$group_col,
+    title = paste0("UMAP colored by ", res_sox11_vs_gata6$contrast$group_col)
+  ) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), legend.position = "none")
+
+p2 <- ggplot(res_sox11_vs_gata6$umap_df, aes(x = UMAP1, y = UMAP2, color = class_name)) +
+  geom_point(alpha = 0.7) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), legend.position = "none") +
+  ggtitle("UMAP colored by class")
+
+p3 <- ggplot(res_sox11_vs_gata6$umap_df, aes(x = UMAP1, y = UMAP2, color = region_level1)) +
+  geom_point(alpha = 0.7) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), legend.position = "none") +
+  ggtitle("UMAP colored by region")
+
+p <- (p1 | p2 | p3)
+p
+
+res_sox11_vs_gata6$fgsea_top %>%
+  dplyr::filter(database == "GO_BP") %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_sox11_vs_gata6$contrast$group2, " vs ", res_sox11_vs_gata6$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_pou3f3_vs_gata6 <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Gata6",
+  group2 = "Pou3f3",
+)
+
+ggplot(res_pou3f3_vs_gata6$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_pou3f3_vs_gata6$contrast$group_col
+  ) +
+  ggtitle("UMAP colored by gene target")
+
+res_pou3f3_vs_gata6$fgsea_top %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_pou3f3_vs_gata6$contrast$group2, " vs ", res_pou3f3_vs_gata6$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+res_gnas_vs_zbtb7a <- run_multi_fgsea(
+  sce = sce,
+  pathways_list = pathways_list,
+  group_col = "gene_target",
+  group1 = "Zbtb7a",
+  group2 = "Gnas",
+)
+
+ggplot(res_gnas_vs_zbtb7a$umap_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    color = res_gnas_vs_zbtb7a$contrast$group_col,
+    title = paste0("UMAP colored by ", res_gnas_vs_zbtb7a$contrast$group_col)
+  )
+
+p <- res_gnas_vs_zbtb7a$fgsea_top %>%
+  dplyr::filter(database == "GO_MF") %>%
+  arrange(padj) %>%
+  slice_head(n = 5) %>%
+  ggplot(aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = paste0("FGSEA: ", res_gnas_vs_zbtb7a$contrast$group2, " vs ", res_gnas_vs_zbtb7a$contrast$group1)
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c(`TRUE` = "#FFCB05", `FALSE` = "#CCCCCC"))
+```
+
+```{r}
+le <- get_leading_edge(res_gnas_vs_zbtb7a, "GO_MF", "GOMF_TRANSCRIPTION_FACTOR_BINDING")
+
+genes <- le %>%
+  dplyr::distinct(gene) |>
+  dplyr::filter(!is.na(gene)) |>
+  dplyr::filter(gene %in% rownames(res_gnas_vs_zbtb7a$sce_umap)) |>
+  dplyr::slice_head(n = 20) |>
+  dplyr::pull(gene)
+
+scater::plotExpression(
+  res_gnas_vs_zbtb7a$sce_umap,
+  features = genes,
+  x = res_gnas_vs_zbtb7a$contrast$group_col
+)
+```
+
+```{r}
+le <- get_leading_edge(
+  res_gnas_vs_zbtb7a,
+  "GO_MF",
+  "GOMF_TRANSCRIPTION_FACTOR_BINDING"
+)
+
+genes <- le %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  filter(!is.na(gene)) %>%
+  filter(gene %in% rownames(res_gnas_vs_zbtb7a$sce_umap)) %>%
+  arrange(desc(abs(logFC))) %>%
+  slice_head(n = 20) %>%
+  pull(gene)
+
+expr_mat <- SummarizedExperiment::assay(
+  res_gnas_vs_zbtb7a$sce_umap,
+  "logcounts"
+)[genes, , drop = FALSE]
+
+group_vec <- colData(res_gnas_vs_zbtb7a$sce_umap)[[res_gnas_vs_zbtb7a$contrast$group_col]]
+names(group_vec) <- colnames(res_gnas_vs_zbtb7a$sce_umap)
+
+heat_df <- as.data.frame(as.matrix(expr_mat)) %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "cell", values_to = "expr") %>%
+  mutate(group = group_vec[cell]) %>%
+  group_by(gene, group) %>%
+  summarize(expr = mean(expr), .groups = "drop")
+
+heat_mat <- heat_df %>%
+  pivot_wider(names_from = group, values_from = expr) %>%
+  as.data.frame()
+
+rownames(heat_mat) <- heat_mat$gene
+heat_mat$gene <- NULL
+heat_mat <- as.matrix(heat_mat)
+
+heat_mat <- heat_mat[, c(
+  res_gnas_vs_zbtb7a$contrast$group1,
+  res_gnas_vs_zbtb7a$contrast$group2
+), drop = FALSE]
+
+p <- pheatmap(
+  t(heat_mat),
+  scale = "none",
+  cluster_rows = FALSE,
+  cluster_cols = TRUE,
+  border_color = NA,
+  fontsize_row = 10,
+  fontsize_col = 11,
+  main = "Zbtb7a vs Gnas: GOMF_TRANSCRIPTION_FACTOR_BINDING", # make main smaller
+  main_font_size = 7
+)
+```
+
+# Old code
+
+```r starting_point
+sce_pou3f3 <- sce[, sce$gene_target %in% c("Pou3f3", "Non_target")]
+# table(sce_pou3f3$gene_target)
+
+sce_pou3f3_pvalb <- sce[, sce$gene_target %in% c("Pou3f3", "Non_target") &
+                        sce$subclass_name == "052 Pvalb Gaba"]
+
+table(sce_pou3f3_pvalb$gene_target) %>% sort(decreasing = TRUE) %>% head(30)
+```
+
+```r umap_pou3f3_pvalb
+# UMAP
+sce_pou3f3_pvalb <- logNormCounts(sce_pou3f3_pvalb)
+sce_pou3f3_pvalb <- runPCA(sce_pou3f3_pvalb, ncomponents = 30)
+sce_pou3f3_pvalb <- runUMAP(sce_pou3f3_pvalb, dimred = "PCA")
+
+plotReducedDim(
+  sce_pou3f3_pvalb,
+  dimred = "UMAP",
+  colour_by = "gene_target"
+) +
+  scale_color_manual(values = c("Non_target" = "#d9d9d9", "Pou3f3" = "#1f1f1f")) +
+  ggtitle("UMAP colored by gene target")
+```
+
+```r
+check_reps <- function(sce, celltype) {
+  as.data.frame(colData(sce)) %>%
+    filter(subclass_name == celltype, passes_qc) %>%
+    mutate(replicate_id = interaction(mouse, sample_label, drop = TRUE)) %>%
+    summarise(
+      n_cells = n(),
+      n_mice = n_distinct(mouse),
+      n_samples = n_distinct(sample_label),
+      n_replicates = n_distinct(replicate_id)
+    )
+}
+check_reps(sce, "052 Pvalb Gaba")
+check_reps(sce, "049 Lamp5 Gaba")
+
+check_nt <- function(sce, celltype) {
+  as.data.frame(colData(sce)) %>%
+    filter(subclass_name == celltype, passes_qc) %>%
+    dplyr::count(gene_target, sort = TRUE)
+}
+
+check_nt(sce, "052 Pvalb Gaba") %>% head(20)
+check_nt(sce, "049 Lamp5 Gaba") %>% head(20)
+
+raw_pert_summary <- function(sce, celltype) {
+  as.data.frame(colData(sce)) %>%
+    filter(subclass_name == celltype, passes_qc) %>%
+    mutate(replicate_id = interaction(mouse, sample_label, drop = TRUE)) %>%
+    dplyr::count(gene_target, replicate_id, name = "n_cells") %>%
+    group_by(gene_target) %>%
+    summarise(
+      n_replicates = n(),
+      total_cells = sum(n_cells),
+      min_cells = min(n_cells),
+      max_cells = max(n_cells),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(n_replicates), desc(total_cells))
+}
+
+raw_pert_summary(sce, "052 Pvalb Gaba") %>% head(30)
+raw_pert_summary(sce, "049 Lamp5 Gaba") %>% head(30)
+```
+
+This was code to help find perturbations that are located in a specific cell type through some form of annotation.
+
+```r
+scan_group_perturb_support <- function(
+  sce,
+  group_col,
+  perturb_col = "gene_target",
+  replicate_col = c("mouse", "mouse_sample"),
+  qc_col = "passes_qc",
+  non_target_label = "Non_target",
+  min_cells_per_rep = 10,
+  min_matched_reps = 3
+) {
+  replicate_col <- match.arg(replicate_col)
+
+  meta <- as.data.frame(colData(sce))
+
+  if (replicate_col == "mouse") {
+    meta$replicate_id <- meta$mouse
+  } else {
+    meta$replicate_id <- interaction(meta$mouse, meta$sample_label, drop = TRUE)
+  }
+
+  meta <- meta %>%
+    dplyr::filter(.data[[qc_col]]) %>%
+    dplyr::filter(!is.na(.data[[group_col]]), !is.na(.data[[perturb_col]]))
+
+  counts_df <- meta %>%
+    dplyr::count(.data[[group_col]], .data[[perturb_col]], replicate_id, name = "n_cells") %>%
+    dplyr::rename(group_value = 1, gene_target = 2)
+
+  nt_df <- counts_df %>%
+    dplyr::filter(gene_target == non_target_label) %>%
+    dplyr::select(group_value, replicate_id, nt_cells = n_cells)
+
+  counts_df %>%
+    dplyr::filter(gene_target != non_target_label) %>%
+    dplyr::inner_join(nt_df, by = c("group_value", "replicate_id")) %>%
+    dplyr::mutate(
+      ok_pair = n_cells >= min_cells_per_rep & nt_cells >= min_cells_per_rep
+    ) %>%
+    dplyr::group_by(group_value, gene_target) %>%
+    dplyr::summarise(
+      n_matched_replicates = sum(ok_pair),
+      total_pert_cells = sum(n_cells),
+      total_nt_cells = sum(nt_cells),
+      min_pert_cells = min(n_cells),
+      max_pert_cells = max(n_cells),
+      min_nt_cells = min(nt_cells),
+      max_nt_cells = max(nt_cells),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(n_matched_replicates >= min_matched_reps) %>%
+    dplyr::arrange(dplyr::desc(n_matched_replicates), dplyr::desc(total_pert_cells))
+}
+
+cand_subclass <- scan_group_perturb_support(
+  sce,
+  group_col = "subclass_name",
+  replicate_col = "mouse",
+  min_cells_per_rep = 10,
+  min_matched_reps = 3
+)
+
+cand_class <- scan_group_perturb_support(
+  sce,
+  group_col = "class_name",
+  replicate_col = "mouse",
+  min_cells_per_rep = 10,
+  min_matched_reps = 3
+)
+
+cand_region1 <- scan_group_perturb_support(
+  sce,
+  group_col = "region_level1",
+  replicate_col = "mouse",
+  min_cells_per_rep = 10,
+  min_matched_reps = 3
+)
+
+cand_region2 <- scan_group_perturb_support(
+  sce,
+  group_col = "region_level2",
+  replicate_col = "mouse",
+  min_cells_per_rep = 10,
+  min_matched_reps = 3
+)
+
+head(cand_subclass, 30)
+head(cand_class, 30)
+head(cand_region1, 30)
+head(cand_region2, 30)
+```
+
+
+```r
+library(Matrix)
+perturbation <- "Zbtb7a"
+region <- "Cortex"
+sce_fgsea <- sce[, 
+  sce$region_level1 == region &
+  sce$gene_target %in% c("Non_target", perturbation) &
+  sce$passes_qc
+]
+
+table(sce_fgsea$gene_target) %>% head(20)
+table(sce_fgsea$mouse)
+
+pb_id <- interaction(sce_fgsea$mouse, sce_fgsea$gene_target, drop = TRUE)
+
+pb_counts <- sapply(levels(pb_id), function(g) {
+  cols <- which(pb_id == g)
+  Matrix::rowSums(assay(sce_fgsea, "counts")[, cols, drop = FALSE])
+})
+
+pb_counts <- as.matrix(pb_counts)
+colnames(pb_counts) <- levels(pb_id)
+
+pb_meta <- data.frame(sample = colnames(pb_counts))
+pb_meta$mouse <- sub("\\.(.*)$", "", pb_meta$sample)
+pb_meta$gene_target <- sub("^[^.]+\\.", "", pb_meta$sample)
+
+pb_meta$gene_target <- factor(pb_meta$gene_target,
+                             levels = c("Non_target", perturbation))
+
+pb_meta
+
+y <- DGEList(counts = pb_counts)
+
+keep <- filterByExpr(y, group = pb_meta$gene_target)
+y <- y[keep, , keep.lib.sizes = FALSE]
+
+y <- calcNormFactors(y)
+
+design <- model.matrix(~ gene_target, data = pb_meta)
+
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design)
+qlf <- glmQLFTest(fit, coef = 2)
+
+de_tab <- topTags(qlf, n = Inf)$table
+head(de_tab)
+ranks <- de_tab$logFC * -log10(de_tab$PValue + 1e-300)
+names(ranks) <- rownames(de_tab)
+ranks <- sort(ranks, decreasing = TRUE)
+names(ranks) <- toupper(names(ranks))
+
+msig_mouse <- msigdbr(species = "Mus musculus")
+colnames(msig_mouse)
+
+hallmark_df <- msig_mouse %>%
+  filter(gs_collection == "H")
+
+pathways <- split(hallmark_df$gene_symbol, hallmark_df$gs_name)
+pathways <- lapply(pathways, toupper)
+
+fg <- fgsea(
+  pathways = pathways,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fg <- fg[order(fg$padj), ]
+
+head(fg[, c("pathway", "NES", "padj")], 20)
+
+top_fg <- fg %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+ggplot(top_fg, aes(x = reorder(pathway, NES), y = NES)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Normalized enrichment score",
+    title = "FGSEA: Zbtb7a vs Non_target: Hallmark"
+  )
+```
+
